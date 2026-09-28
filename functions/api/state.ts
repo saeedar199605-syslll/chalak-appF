@@ -4,6 +4,7 @@ import { canDelegate, canPerformWorkflowAction, isWithinSupervisorScope, workflo
 import { authorize, DEFAULT_GRANULAR_PERMISSION_POLICY, type GranularPermissionPolicy } from '../../src/utils/authorization';
 import { validateEvaluationWrite } from '../../src/utils/workflowSecurity';
 import { resolveWorkflowAssignee } from '../../src/utils/workflowAssignee';
+import { getEmployeeDeletionBlockReason } from '../../src/utils/employeeDeletion';
 import type { Criterion, Employee, Evaluation, UserNotification, WorkflowTransitionLog } from '../../src/types';
 
 interface Context {
@@ -282,9 +283,12 @@ function safeAdminMasterDataChanges(current: CloudState, changes: CloudState): b
   const employees = Array.isArray(changes.pe_employees) ? changes.pe_employees as Employee[] : existingEmployees;
   const remainingEmployeeIds = new Set(employees.map(item => item.id));
   const currentEvaluations = Array.isArray(current.pe_evaluations) ? current.pe_evaluations as Evaluation[] : [];
+  const evaluations = Array.isArray(changes.pe_evaluations) ? changes.pe_evaluations as Evaluation[] : currentEvaluations;
   const archivedEvaluations = Array.isArray(current.pe_archived_evaluations) ? current.pe_archived_evaluations as Evaluation[] : [];
-  if (existingEmployees.some(item => !remainingEmployeeIds.has(item.id) && (item.role === 'admin' ||
-      currentEvaluations.some(evaluation => evaluation.empId === item.id) || archivedEvaluations.some(evaluation => evaluation.empId === item.id)))) return false;
+  for (const item of existingEmployees) {
+    if (remainingEmployeeIds.has(item.id)) continue;
+    if (getEmployeeDeletionBlockReason(item, employees, evaluations, archivedEvaluations)) return false;
+  }
 
   const existingCriteria = Array.isArray(current.pe_criteria) ? current.pe_criteria as Array<{ id: string }> : [];
   const criteria = Array.isArray(changes.pe_criteria) ? changes.pe_criteria as Array<{ id: string }> : existingCriteria;

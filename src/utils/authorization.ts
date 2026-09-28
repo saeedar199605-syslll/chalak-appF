@@ -59,7 +59,7 @@ export const DEFAULT_WORKFLOW_CEILINGS: Record<Employee['role'], WorkflowStageKe
 };
 
 const grant = (type: PermissionScope['type']): PermissionScope => ({ type } as PermissionScope);
-const DEFAULT_ROLE_GRANTS: Record<Employee['role'], ModuleGrants> = {
+export const DEFAULT_ROLE_GRANTS: Record<Employee['role'], ModuleGrants> = {
   admin: {},
   supervisor: {
     evaluations: { view: grant('authorized_employees'), edit: grant('authorized_employees'), submit: grant('authorized_employees'), advance_workflow: grant('authorized_employees') },

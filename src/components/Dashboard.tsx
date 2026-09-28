@@ -25,7 +25,7 @@ import {
   ,Lock, Scale, Pencil
 } from 'lucide-react';
 import { motion } from 'motion/react';
-import { Criterion, JobProfile, Employee, Evaluation, CYCLE_STEPS, getGrade, GRADE_DETAILS } from '../types';
+import { Criterion, JobProfile, Employee, Evaluation, CYCLE_STEPS, getGrade, GRADE_DETAILS, WORKFLOW_STAGES, type WorkflowStageKey } from '../types';
 import SmartGrowthAnalytics from './SmartGrowthAnalytics';
 import RadarChartD3, { CompetencyDimensionData } from './RadarChartD3';
 import CalendarWidget from './CalendarWidget';
@@ -176,20 +176,69 @@ export default function Dashboard({
   const totalProfiles = profiles.length;
   const totalEmployees = employees.length;
   const activePeriod = db.getMiscData<string>('pe_active_period', '');
+  const activePeriodKey = activePeriod.trim();
+  const activePeriodEvaluations = activePeriodKey
+    ? evaluations.filter(item => item.period.trim() === activePeriodKey)
+    : [];
   const assignedTasks = evaluations.filter(item => item.stage !== 'completed' && item.currentAssigneeId === currentUser.id).length;
+  const employeesById = new Map(employees.map(item => [item.id, item]));
+  const profilesById = new Map(profiles.map(item => [item.id, item]));
+  const criteriaById = new Map(criteria.flatMap(item => [[item.id, item], [item.code, item]]));
+  const misIncompleteCount = activePeriodEvaluations.filter(item => {
+    if (item.stage === 'completed' || item.status === 'locked') return false;
+    const employee = employeesById.get(item.empId);
+    const profile = profilesById.get(item.profileId || employee?.profileId || '');
+    const requiredMisCriteria = (profile?.items || [])
+      .map(profileItem => criteriaById.get(profileItem.cid))
+      .filter((criterion): criterion is Criterion => Boolean(criterion && criterion.scoringSource === 'mis' && criterion.autoPopulate !== false));
+    return requiredMisCriteria.some(criterion => {
+      const score = item.scores.find(candidate => candidate.cid === criterion.id || candidate.cid === criterion.code);
+      return score?.sourceType !== 'mis' || score.autoPopulated !== true;
+    });
+  }).length;
+  const pendingStages = activePeriodEvaluations
+    .filter(item => item.stage !== 'completed' && item.status !== 'locked')
+    .map(item => item.stage || (item.status === 'calibrated' ? 'hr_approval' : 'supervisor_review'));
+  const pendingStageCounts = new Map<WorkflowStageKey, number>();
+  for (const stage of pendingStages) pendingStageCounts.set(stage, (pendingStageCounts.get(stage) || 0) + 1);
+  const recommendedPendingStage = [...pendingStageCounts.keys()].sort((left, right) => {
+    if (left === 'rejected') return -1;
+    if (right === 'rejected') return 1;
+    return WORKFLOW_STAGES[left].stepNumber - WORKFLOW_STAGES[right].stepNumber;
+  })[0];
+  const stageTitles: Partial<Record<WorkflowStageKey, string>> = {
+    self_review: 'خودارزیابی کارکنان',
+    supervisor_review: 'ارزیابی سرپرست',
+    peer_review: 'ارزیابی همتا',
+    calibration_review: 'کالیبراسیون',
+    hr_approval: 'تصویب منابع انسانی',
+    feedback_meeting: 'جلسات بازخورد',
+    rejected: 'پرونده‌های عودت‌شده',
+    appealed: 'رسیدگی به اعتراض',
+  };
   const setupChecks = [
     { label: 'کارکنان ثبت شده‌اند', done: totalEmployees > 0, tab: 'employees' },
     { label: 'پروفایل شغلی آماده است', done: totalProfiles > 0, tab: 'profiles' },
     { label: 'شاخص‌های ارزیابی آماده‌اند', done: totalCriteria > 0, tab: 'criteria' },
     { label: 'دوره ارزیابی فعال است', done: Boolean(activePeriod.trim()), tab: 'evaluations' },
-    { label: 'ارزیابی‌های دوره آغاز شده‌اند', done: evaluations.some(item => item.period === activePeriod), tab: 'evaluations' },
+    { label: 'ارزیابی‌های دوره آغاز شده‌اند', done: activePeriodEvaluations.length > 0, tab: 'evaluations' },
   ];
   const firstMissingSetup = setupChecks.find(step => !step.done);
   const nextStep = currentUser.role === 'admin'
-    ? (firstMissingSetup ? { title: firstMissingSetup.label, tab: firstMissingSetup.tab } : { title: 'بررسی کارتابل و پیشرفت ارزیابی‌ها', tab: 'workflow' })
+    ? firstMissingSetup
+      ? { title: firstMissingSetup.label, tab: firstMissingSetup.tab, description: 'این مورد باید تکمیل شود تا فرایند دوره ادامه پیدا کند.' }
+      : misIncompleteCount > 0
+        ? { title: 'داده‌های MIS دوره بارگذاری نشده است', tab: 'evaluations', description: `برای ${misIncompleteCount.toLocaleString('fa-IR')} پرونده، شاخص‌های MIS دوره هنوز بارگذاری نشده‌اند.` }
+        : recommendedPendingStage
+          ? {
+              title: `${pendingStageCounts.get(recommendedPendingStage)?.toLocaleString('fa-IR')} پرونده در مرحله ${stageTitles[recommendedPendingStage] || WORKFLOW_STAGES[recommendedPendingStage].label}`,
+              tab: recommendedPendingStage === 'calibration_review' ? 'calibration' : 'workflow',
+              description: `مرحله بعدی بر اساس پرونده‌های دوره ${activePeriodKey} انتخاب شده است.`,
+            }
+          : { title: `دوره ${activePeriodKey} تکمیل شده است؛ مرور نتایج`, tab: 'reports', description: 'همه پرونده‌های دوره نهایی شده‌اند؛ گزارش نتایج را مرور کنید.' }
     : assignedTasks > 0
-      ? { title: `${assignedTasks} پرونده در کارتابل شما نیازمند اقدام است`, tab: 'workflow' }
-      : { title: 'وضعیت ارزیابی‌های کارکنان مجاز را بررسی کنید', tab: 'evaluations' };
+      ? { title: `${assignedTasks.toLocaleString('fa-IR')} پرونده در کارتابل شما نیازمند اقدام است`, tab: 'workflow', description: 'پرونده‌های واگذارشده به شما در کارتابل منتظر اقدام هستند.' }
+      : { title: 'وضعیت ارزیابی‌های کارکنان مجاز را بررسی کنید', tab: 'evaluations', description: 'در حال حاضر پرونده‌ای در کارتابل شما منتظر اقدام نیست.' };
 
   const completedEvals = evaluations.filter(e => e.status === 'locked');
   const calibratedEvals = evaluations.filter(e => e.status === 'calibrated');
@@ -295,7 +344,10 @@ export default function Dashboard({
         <div className="min-w-0">
           <p className="text-[11px] font-bold text-teal-700 dark:text-teal-300">گام بعدی پیشنهادی</p>
           <h2 className="mt-1 text-sm font-black text-slate-900 dark:text-slate-100">{nextStep.title}</h2>
-          {currentUser.role === 'admin' && <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{setupChecks.filter(step => step.done).length} از {setupChecks.length} مورد آمادگی تکمیل شده · {activePeriod ? `دوره فعال: ${activePeriod}` : 'دوره‌ای فعال نشده است'}</p>}
+          <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+            {nextStep.description}
+            {currentUser.role === 'admin' && <> · {setupChecks.filter(step => step.done).length} از {setupChecks.length} مورد آمادگی تکمیل شده · {activePeriod ? `دوره فعال: ${activePeriod}` : 'دوره‌ای فعال نشده است'}</>}
+          </p>
         </div>
         <button type="button" onClick={() => onNavigate(nextStep.tab)} className="min-h-11 shrink-0 rounded-xl bg-teal-600 px-4 py-2 text-xs font-bold text-white hover:bg-teal-700">رفتن به گام بعد</button>
       </section>

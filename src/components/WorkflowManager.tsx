@@ -57,6 +57,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { Table as UiTable } from './ui/Primitives';
+import { VirtualizedTable } from './VirtualizedTable';
 import { downloadWorkflowCalendarICS, DEFAULT_WORKFLOW_DEADLINES } from '../utils/calendarExport';
 import { resolveWorkflowAssignee } from '../utils/workflowAssignee';
 import { buildBulkAdvanceUpdates, previewBulkAdvance, type BulkAdvanceReason, type BulkAdvanceRow } from '../utils/bulkWorkflow';
@@ -3122,16 +3123,19 @@ export default function WorkflowManager({
               <div className="rounded-xl bg-emerald-500/10 text-emerald-300 p-3 text-xs">واجد شرایط: <strong>{bulkAdvancePreviewRows.filter(row => row.reason === 'eligible').length}</strong></div>
               <div className="rounded-xl bg-amber-500/10 text-amber-300 p-3 text-xs">کنار گذاشته‌شده: <strong>{bulkAdvancePreviewRows.filter(row => row.reason !== 'eligible').length}</strong></div>
             </div>
-            <div className="px-4 pb-4 overflow-y-auto max-h-[48vh] space-y-2">
-              {bulkAdvancePreviewRows.map(row => (
-                <div key={row.evaluationId} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div>
-                    <strong>{row.employeeName}</strong>{row.employeeCode ? <span className="text-slate-500 mr-2">({row.employeeCode})</span> : null}
-                    <div className="text-slate-400 mt-1">{WORKFLOW_STAGES[row.fromStage]?.label || row.fromStage} ← {row.toStage ? WORKFLOW_STAGES[row.toStage]?.label : 'مرحله بعد موجود نیست'}</div>
-                  </div>
-                  <span className={row.reason === 'eligible' ? 'text-emerald-300 font-bold' : 'text-amber-300'}>{bulkAdvanceReasonLabel[row.reason]}</span>
-                </div>
-              ))}
+            <div className="px-4 pb-4">
+              <VirtualizedTable<BulkAdvanceRow>
+                items={bulkAdvancePreviewRows}
+                rowHeight={64}
+                containerHeight={320}
+                keyExtractor={row => row.evaluationId}
+                columns={[{ header: 'کارمند', width: 'w-56' }, { header: 'مرحله', width: 'flex-1' }, { header: 'نتیجه', width: 'w-32' }]}
+                renderRow={row => <>
+                  <div className="w-56 truncate text-xs"><strong>{row.employeeName}</strong>{row.employeeCode ? <span className="text-slate-500 mr-2">({row.employeeCode})</span> : null}</div>
+                  <div className="flex-1 truncate text-[11px] text-slate-400">{WORKFLOW_STAGES[row.fromStage]?.label || row.fromStage} ← {row.toStage ? WORKFLOW_STAGES[row.toStage]?.label : 'مرحله بعد موجود نیست'}</div>
+                  <div className={`w-32 text-[11px] ${row.reason === 'eligible' ? 'text-emerald-300 font-bold' : 'text-amber-300'}`}>{bulkAdvanceReasonLabel[row.reason]}</div>
+                </>}
+              />
             </div>
             <footer className="p-4 border-t border-slate-800 flex justify-end gap-2">
               <button type="button" onClick={() => setBulkAdvancePreviewRows(null)} className="px-4 py-2 rounded-xl text-xs font-bold text-slate-300 bg-slate-800 hover:bg-slate-700">بازگشت</button>

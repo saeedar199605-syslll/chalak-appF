@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import { VirtualizedTable } from './VirtualizedTable';
 import { 
   FileSpreadsheet, 
   Upload, 
@@ -18,11 +19,31 @@ import {
   Info
 } from 'lucide-react';
 
+export interface ImportPreviewRow {
+  rowNumber: number;
+  status: string;
+  name: string;
+  code: string;
+  changes?: Array<{ field: string; before: string; after: string }>;
+  issues?: string[];
+}
+
+export interface PreparedImport {
+  preview: {
+    rows: ImportPreviewRow[];
+    counts: Record<string, number>;
+    changedCount: number;
+    removedCount?: number;
+  };
+  commit: () => { count: number; message?: string; errors?: string[] };
+}
+
 export interface DataExchangeConfig<T> {
   entityName: string; // e.g. 'بانک شاخص‌های شایستگی', 'پروفایل‌های شغلی', 'مدیریت پرسنل', 'ارزیابی‌ها'
   entityKey: string; // e.g. 'criteria', 'job_profiles', 'employees', 'evaluations'
   items: T[];
   onImport: (importedItems: any[], mode: 'merge' | 'replace') => { count: number; message?: string; errors?: string[] };
+  prepareImport?: (importedItems: any[], mode: 'merge' | 'replace') => PreparedImport;
   csvHeaders: { key: keyof T | string; label: string; accessor?: (item: T) => any }[];
   templateSampleRows?: Record<string, string>[];
 }
@@ -31,6 +52,7 @@ interface UniversalDataExchangeProps<T> {
   config: DataExchangeConfig<T>;
   isOpen: boolean;
   onClose: () => void;
+  externalImportRequest?: { id: string; items: any[]; mode?: 'merge' | 'replace' } | null;
   theme?: 'dark' | 'light';
 }
 
@@ -38,13 +60,36 @@ export default function UniversalDataExchange<T>({
   config,
   isOpen,
   onClose,
+  externalImportRequest = null,
   theme = 'dark'
 }: UniversalDataExchangeProps<T>) {
   const [activeTab, setActiveTab] = useState<'export' | 'import'>('export');
   const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
   const [rawTextInput, setRawTextInput] = useState('');
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string; errors?: string[] } | null>(null);
+  const [pendingImport, setPendingImport] = useState<PreparedImport | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const importCommitStartedRef = useRef(false);
+  const lastExternalImportIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen || !externalImportRequest || !config.prepareImport || lastExternalImportIdRef.current === externalImportRequest.id) return;
+    lastExternalImportIdRef.current = externalImportRequest.id;
+    const mode = externalImportRequest.mode || 'merge';
+    setActiveTab('import');
+    setImportMode(mode);
+    setStatusMessage(null);
+    setRawTextInput('');
+    try {
+      const prepared = config.prepareImport(externalImportRequest.items, mode);
+      setPendingImport(prepared);
+      setStatusMessage({ type: 'info', text: 'Preview ready. Employee data has not been changed.' });
+      importCommitStartedRef.current = false;
+    } catch (error) {
+      setPendingImport(null);
+      setStatusMessage({ type: 'error', text: `Import preview could not be prepared: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }, [config, externalImportRequest, isOpen]);
 
   if (!isOpen) return null;
 
@@ -232,6 +277,15 @@ export default function UniversalDataExchange<T>({
         throw new Error('هیچ داده معتبری برای درون‌ریزی شناسایی نشد.');
       }
 
+      if (config.prepareImport) {
+        const prepared = config.prepareImport(parsedItems, importMode);
+        setPendingImport(prepared);
+        importCommitStartedRef.current = false;
+        setStatusMessage({ type: 'info', text: 'Preview ready. Employee data has not been changed.' });
+        setRawTextInput('');
+        return;
+      }
+
       const result = config.onImport(parsedItems, importMode);
       setStatusMessage({
         type: result.errors && result.errors.length > 0 && result.count === 0 ? 'error' : 'success',
@@ -242,6 +296,37 @@ export default function UniversalDataExchange<T>({
     } catch (err: any) {
       setStatusMessage({ type: 'error', text: `خطا در پردازش فایل: ${err.message}` });
     }
+  };
+
+  const cancelPreparedImport = () => {
+    setPendingImport(null);
+    setRawTextInput('');
+    setStatusMessage({ type: 'info', text: 'Import cancelled. Employee data was not changed.' });
+    importCommitStartedRef.current = false;
+  };
+
+  const confirmPreparedImport = () => {
+    if (!pendingImport || importCommitStartedRef.current) return;
+    importCommitStartedRef.current = true;
+    try {
+      const result = pendingImport.commit();
+      setPendingImport(null);
+      setStatusMessage({
+        type: result.errors?.length && result.count === 0 ? 'error' : 'success',
+        text: result.message || `Imported ${result.count} employee records.`,
+        errors: result.errors,
+      });
+    } catch (error) {
+      setStatusMessage({ type: 'error', text: `Import could not be applied: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  };
+
+  const closeExchange = () => {
+    setPendingImport(null);
+    setRawTextInput('');
+    setStatusMessage(null);
+    importCommitStartedRef.current = false;
+    onClose();
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -322,7 +407,7 @@ export default function UniversalDataExchange<T>({
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={closeExchange}
             className={`p-2 rounded-xl transition-colors cursor-pointer ${
               isDark ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
             }`}
@@ -336,6 +421,7 @@ export default function UniversalDataExchange<T>({
           isDark ? 'border-slate-800 bg-slate-950/60' : 'border-slate-200 bg-slate-100/70'
         }`}>
           <button
+            disabled={Boolean(pendingImport)}
             onClick={() => { setActiveTab('export'); setStatusMessage(null); }}
             className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
               activeTab === 'export'
@@ -347,6 +433,7 @@ export default function UniversalDataExchange<T>({
             <span>خروجی گرفتن و دانلود (Export)</span>
           </button>
           <button
+            disabled={Boolean(pendingImport)}
             onClick={() => { setActiveTab('import'); setStatusMessage(null); }}
             className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
               activeTab === 'import'
@@ -387,7 +474,54 @@ export default function UniversalDataExchange<T>({
 
         {/* Tab Body */}
         <div className="p-5 overflow-y-auto space-y-4 flex-1">
-          {activeTab === 'export' ? (
+          {pendingImport ? (
+            <div className="space-y-4" aria-label="Employee import preview">
+              <div className={`rounded-2xl border p-4 ${isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-200' : 'border-amber-300 bg-amber-50 text-amber-900'}`}>
+                <h4 className="font-black text-sm">Preview before applying</h4>
+                <p className="mt-1 text-xs">No employee records have been changed. Review the row classifications and old → new values, then confirm or cancel.</p>
+                <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-bold">
+                  {['NEW', 'UPDATE', 'UNCHANGED', 'INVALID', 'DUPLICATE', 'UNKNOWN / UNMAPPED'].map(status => (
+                    <span key={status} className="rounded-lg border border-current/20 px-2 py-1">{status}: {pendingImport.preview.counts[status] || 0}</span>
+                  ))}
+                  {pendingImport.preview.removedCount !== undefined && <span className="rounded-lg border border-current/20 px-2 py-1">REMOVED by replace: {pendingImport.preview.removedCount}</span>}
+                </div>
+              </div>
+
+              <VirtualizedTable<ImportPreviewRow>
+                items={pendingImport.preview.rows}
+                columns={[{ header: 'Status', width: 'w-36' }, { header: 'Employee', width: 'w-56' }, { header: 'Proposed changes / issues', className: 'flex-1' }]}
+                rowHeight={64}
+                containerHeight={300}
+                theme={theme}
+                keyExtractor={row => `${row.rowNumber}-${row.code}`}
+                emptyState={<p>No input rows to preview.</p>}
+                renderRow={row => (
+                  <>
+                    <div className="w-36 shrink-0 pr-2 text-[10px] font-black" data-testid={`import-status-${row.rowNumber}`}>{row.status}</div>
+                    <div className="w-56 shrink-0 truncate pr-2 text-[10px]">
+                      <div className="font-bold">{row.name}</div>
+                      <div className="text-slate-500">{row.code}</div>
+                    </div>
+                    <div className="min-w-0 flex-1 truncate text-[10px]">
+                      {row.changes?.length ? row.changes.slice(0, 3).map(change => (
+                        <div key={change.field} className="truncate"><span className="font-bold">{change.field}:</span> {change.before} → {change.after}</div>
+                      )) : row.issues?.join(' · ') || 'No field changes'}
+                      {(row.changes?.length || 0) > 3 && <div className="text-slate-500">+{(row.changes?.length || 0) - 3} more changes</div>}
+                    </div>
+                  </>
+                )}
+              />
+
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <button type="button" onClick={cancelPreparedImport} className={`rounded-xl border px-4 py-3 text-xs font-bold ${isDark ? 'border-slate-700 text-slate-200 hover:bg-slate-800' : 'border-slate-300 text-slate-700 hover:bg-slate-100'}`}>
+                  Cancel import
+                </button>
+                <button type="button" onClick={confirmPreparedImport} className="rounded-xl bg-emerald-600 px-4 py-3 text-xs font-black text-white hover:bg-emerald-500" aria-label="Confirm and apply import">
+                  Confirm and apply import ({pendingImport.preview.changedCount})
+                </button>
+              </div>
+            </div>
+          ) : activeTab === 'export' ? (
             <div className="space-y-4">
               <div className={`p-4 rounded-2xl border space-y-2 ${
                 isDark ? 'bg-slate-800/40 border-slate-800' : 'bg-slate-50 border-slate-200'

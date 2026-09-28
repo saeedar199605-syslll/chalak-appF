@@ -14,6 +14,7 @@ import { SEED_CRITERIA, SEED_PROFILES, SEED_EMPLOYEES, SEED_EVALUATIONS } from '
 import { INITIAL_OKRS, INITIAL_ONE_ON_ONES, INITIAL_KUDOS } from '../data/latticeKickidlerSeed';
 import { CLOUD_SYNC_KEYS, CloudState, isCloudSyncKey } from '../../cloudflare/syncState';
 import { DelegationRecord } from './workflowAuthorization';
+import { planEmployeeBulkDeletion } from './employeeDeletion';
 import { CLOUD_SYNC_MAX_RETRIES, CLOUD_SYNC_POLL_INTERVAL_MS, getCloudRetryDelay, isCurrentSyncGeneration, selectCloudSyncOperation, shouldAttemptSync, shouldRetryCloudStatus } from '../../cloudflare/syncPolicy';
 
 const STORAGE_KEYS = {
@@ -319,13 +320,8 @@ export class AppDatabase {
     const target = employees.find(e => e.id === id);
     if (!target) return false;
 
-    // Protect main admin
-    if (target.role === 'admin' && (target.username === 'admin' || target.code === 'ADMIN-001')) {
-      return false;
-    }
-
-    // Keep identity references and historical evaluation records intact.
-    if (this.getEvaluations().some(ev => ev.empId === id) || this.getArchivedEvaluations().some(ev => ev.empId === id)) return false;
+    const deletionPlan = planEmployeeBulkDeletion([id], employees, this.getEvaluations(), this.getArchivedEvaluations());
+    if (!deletionPlan.deletableIds.has(id)) return false;
 
     const filtered = employees.filter(e => e.id !== id);
     this.saveEmployees(filtered);
@@ -333,18 +329,13 @@ export class AppDatabase {
     return true;
   }
 
-  /**
-   * Batch delete employees with cascade removal of evaluations and safety check for main admin
-   */
+  /** Batch-delete employees only when history, open tasks, and remaining links permit removal. */
   public deleteEmployeesBatch(ids: string[]): { success: boolean; deletedCount: number; blockedCount: number } {
     if (!ids || ids.length === 0) return { success: true, deletedCount: 0, blockedCount: 0 };
-    const idSet = new Set(ids);
     const employees = this.getEmployees();
-    
-    // Filter out protected admins from deletion set
-    const historicalEmployeeIds = new Set([...this.getEvaluations(), ...this.getArchivedEvaluations()].map(evaluation => evaluation.empId));
-    const targetsToDelete = employees.filter(e => idSet.has(e.id) && !(e.role === 'admin' && (e.username === 'admin' || e.code === 'ADMIN-001')) && !historicalEmployeeIds.has(e.id));
-    const blockedCount = employees.filter(e => idSet.has(e.id) && !targetsToDelete.some(target => target.id === e.id)).length;
+    const deletionPlan = planEmployeeBulkDeletion(ids, employees, this.getEvaluations(), this.getArchivedEvaluations());
+    const targetsToDelete = employees.filter(employee => deletionPlan.deletableIds.has(employee.id));
+    const blockedCount = new Set(ids).size - targetsToDelete.length;
     if (targetsToDelete.length === 0) return { success: true, deletedCount: 0, blockedCount };
 
     const validDeleteIds = new Set(targetsToDelete.map(e => e.id));
@@ -472,15 +463,16 @@ export class AppDatabase {
 
     this.saveCriteria(remainingCriteria);
 
-    // Cascade remove from profiles
+    // Cascade only IDs that passed the dependency checks above. A mixed bulk
+    // request must leave protected criteria and their references intact.
     let affectedProfiles = 0;
     const updatedProfiles = profiles.map(profile => {
-      const hasItem = profile.items.some(item => idSet.has(item.cid));
+      const hasItem = profile.items.some(item => safeIds.has(item.cid));
       if (hasItem) {
         affectedProfiles++;
         return {
           ...profile,
-          items: profile.items.filter(item => !idSet.has(item.cid))
+          items: profile.items.filter(item => !safeIds.has(item.cid))
         };
       }
       return profile;
@@ -492,12 +484,12 @@ export class AppDatabase {
     // Cascade remove from evaluations
     let affectedEvaluations = 0;
     const updatedEvals = evals.map(evaluation => {
-      const hasScore = evaluation.scores.some(s => idSet.has(s.cid));
+      const hasScore = evaluation.scores.some(s => safeIds.has(s.cid));
       if (hasScore) {
         affectedEvaluations++;
         return {
           ...evaluation,
-          scores: evaluation.scores.filter(s => !idSet.has(s.cid))
+          scores: evaluation.scores.filter(s => !safeIds.has(s.cid))
         };
       }
       return evaluation;

@@ -242,6 +242,12 @@ export default function MyEvaluation({
             );
           })}
         </div>
+        {currentStage === 'rejected' && userEval && (
+          <div role="status" className="mt-4 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
+            <strong>گام بعدی: خودارزیابی و شواهد را اصلاح و دوباره به سرپرست ارسال کنید.</strong>
+            {userEval.rejectionReason && <p className="mt-1">علت بازگشت: {userEval.rejectionReason}</p>}
+          </div>
+        )}
       </div>
 
       {/* Grid: Self-assessment input & Score indicator */}

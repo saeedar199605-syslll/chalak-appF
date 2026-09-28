@@ -57,6 +57,7 @@ import {  browserNotifications } from './utils/browserNotifications';
 import {  db } from './utils/db';
 import { canAccessTab, defaultTabFor } from './utils/accessControl';
 import { buildEvaluationStarts, isEvaluationPeriodActive } from './utils/evaluationStart';
+import { employeeDeletionBlockMessage, getEmployeeDeletionBlockReason, planEmployeeBulkDeletion } from './utils/employeeDeletion';
 import {  
   validateEmployeeInput, 
   validateCriterionInput, 
@@ -702,13 +703,9 @@ export default function App() {
   const handleDeleteEmployee = async (id: string): Promise<boolean> => {
     const target = employees.find(e => e.id === id);
     if (!target) return false;
-    // Protect primary root admin account only
-    if (target.username === 'admin' && target.code === 'ADMIN-001') {
-      alert('حساب مدیر ارشد سیستم (ADMIN-001) محافظت‌شده بوده و قابل حذف نمی‌باشد.');
-      return false;
-    }
-    if (evaluations.some(item => item.empId === id) || db.getArchivedEvaluations().some(item => item.empId === id)) {
-      alert('این کارمند در سوابق ارزیابی فعال یا بایگانی‌شده استفاده شده است؛ برای حفظ تاریخچه حذف نمی‌شود.');
+    const blockReason = getEmployeeDeletionBlockReason(target, employees.filter(employee => employee.id !== id), evaluations, db.getArchivedEvaluations());
+    if (blockReason) {
+      alert(employeeDeletionBlockMessage(blockReason));
       return false;
     }
     if (!(await removeCloudCredential(target.username))) {
@@ -730,12 +727,11 @@ export default function App() {
 
   const handleBulkDeleteEmployees = async (ids: string[]): Promise<boolean> => {
     if (!ids || ids.length === 0) return false;
-    const archivedEmployeeIds = new Set(db.getArchivedEvaluations().map(item => item.empId));
-    const requested = employees.filter(employee => ids.includes(employee.id));
-    const targets = requested.filter(employee => employee.role !== 'admin' && !evaluations.some(item => item.empId === employee.id) && !archivedEmployeeIds.has(employee.id));
-    const blockedCount = requested.length - targets.length;
+    const deletionPlan = planEmployeeBulkDeletion(ids, employees, evaluations, db.getArchivedEvaluations());
+    const targets = employees.filter(employee => deletionPlan.deletableIds.has(employee.id));
+    const blockedCount = new Set(ids).size - targets.length;
     if (!targets.length) {
-      alert('کارکنان انتخاب‌شده دارای سوابق ارزیابی یا حساب محافظت‌شده هستند و حذف نشدند.');
+      alert('کارکنان انتخاب‌شده سابقه، پرونده باز، رابطه سازمانی یا حساب محافظت‌شده دارند و حذف نشدند.');
       return false;
     }
     // Single bulk credential deletion — ONE request, not N per employee.
@@ -748,7 +744,7 @@ export default function App() {
       setEmployees(db.getEmployees());
       setEvaluations(db.getEvaluations());
       notifyDataSaved();
-      if (blockedCount) alert(`${res.deletedCount} کارمند حذف شد؛ ${blockedCount} مورد به‌دلیل حفظ سوابق یا حساب محافظت‌شده باقی ماند.`);
+      if (blockedCount) alert(`${res.deletedCount} کارمند حذف شد؛ ${blockedCount} مورد به‌دلیل سابقه، پرونده باز، رابطه سازمانی یا حساب محافظت‌شده باقی ماند.`);
       return true;
     }
     return false;

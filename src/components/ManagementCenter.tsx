@@ -75,6 +75,7 @@ import ProductionCycleTimeCalculator from './ProductionCycleTimeCalculator';
 import { getArchivedEvaluations, saveArchivedEvaluations } from '../utils/archiveManager';
 import { db, mergeBackupCollections, validateBackupJSON } from '../utils/db';
 import { generateSecurePassword } from '../utils/password';
+import { planEmployeeBulkDeletion } from '../utils/employeeDeletion';
 import { Table as UiTable } from './ui/Primitives';
 import { 
   ManualAccessPolicy, 
@@ -176,7 +177,17 @@ export default function ManagementCenter({
   };
   const handleConfirmBulkDeleteEmps = async () => {
     if (selectedEmpIds.size === 0) return;
-    const targets = employees.filter(employee => selectedEmpIds.has(employee.id) && employee.username !== 'admin');
+    const deletionPlan = planEmployeeBulkDeletion(
+      Array.from(selectedEmpIds), employees, evaluations, archivedEvaluations || db.getArchivedEvaluations(),
+    );
+    const targets = employees.filter(employee => deletionPlan.deletableIds.has(employee.id));
+    const blockedCount = selectedEmpIds.size - targets.length;
+    if (targets.length === 0) {
+      setCredentialsFeedback({ type: 'warning', message: 'کارکنان انتخاب‌شده سابقه، پرونده باز، رابطه سازمانی یا حساب محافظت‌شده دارند و حذف نشدند.' });
+      setSelectedEmpIds(new Set());
+      setIsBulkDeleteEmpModalOpen(false);
+      return;
+    }
     try {
       // P0 fix: single POST request with all usernames — NOT one DELETE per employee
       await callPasswordApi('/api/auth/password', {
@@ -192,13 +203,16 @@ export default function ManagementCenter({
     const targetIds = new Set(targets.map(employee => employee.id));
     const remaining = employees.filter(employee => !targetIds.has(employee.id));
     onSetEmployees(remaining);
-    onSetEvaluations(evaluations.filter(evaluation => !targetIds.has(evaluation.empId)));
     db.saveMiscData('pe_audit_logs', [
-      { id: Date.now().toString(), date: new Date().toISOString(), user: currentUser.name, action: 'bulk_delete_users', details: 'حذف گروهی ' + selectedEmpIds.size + ' کاربر' },
+      { id: Date.now().toString(), date: new Date().toISOString(), user: currentUser.name, action: 'bulk_delete_users', details: `حذف گروهی ${targets.length} کاربر${blockedCount ? `؛ ${blockedCount} مورد به‌دلیل وابستگی حذف نشد` : ''}` },
       ...(db.getMiscData<any[]>('pe_audit_logs', []))
     ]);
     setSelectedEmpIds(new Set());
     setIsBulkDeleteEmpModalOpen(false);
+    setCredentialsFeedback({
+      type: blockedCount ? 'warning' : 'success',
+      message: blockedCount ? `${targets.length} حساب حذف شد؛ ${blockedCount} مورد به‌دلیل سابقه یا وابستگی حفظ شد.` : `${targets.length} حساب کاربری حذف شد.`,
+    });
   };
 
 
@@ -215,7 +229,7 @@ export default function ManagementCenter({
   const [editingPasswordEmp, setEditingPasswordEmp] = useState<Employee | null>(null);
   const [customPasswordInput, setCustomPasswordInput] = useState('');
   const [showCustomPassInput, setShowCustomPassInput] = useState(true);
-  const [credentialsFeedback, setCredentialsFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [credentialsFeedback, setCredentialsFeedback] = useState<{ type: 'success' | 'error' | 'warning'; message: string } | null>(null);
 
   // --- 2. ADMIN PASSWORD MANAGEMENT ---
   const [currentAdminPasswordInput, setCurrentAdminPasswordInput] = useState('');
@@ -2036,10 +2050,14 @@ export default function ManagementCenter({
               <div className={`p-3.5 rounded-2xl text-xs font-bold flex items-center gap-2 animate-in fade-in ${
                 credentialsFeedback.type === 'success' 
                   ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300' 
-                  : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
+                  : credentialsFeedback.type === 'warning'
+                    ? 'bg-amber-500/10 border border-amber-500/30 text-amber-200'
+                    : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
               }`}>
                 {credentialsFeedback.type === 'success' ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                ) : credentialsFeedback.type === 'warning' ? (
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                 ) : (
                   <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
                 )}

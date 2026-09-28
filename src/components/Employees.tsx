@@ -34,6 +34,7 @@ import { Employee, JobProfile, UserRole, Evaluation } from '../types';
 import { VirtualizedTable } from './VirtualizedTable';
 import { HighlightText } from './HighlightText';
 import UniversalDataExchange, { DataExchangeConfig } from './UniversalDataExchange';
+import { prepareEmployeeImport } from '../utils/employeeImport';
 
 interface EmployeesProps {
   employees: Employee[];
@@ -97,6 +98,7 @@ export default function Employees({
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isExchangeModalOpen, setIsExchangeModalOpen] = useState(false);
+  const [externalImportRequest, setExternalImportRequest] = useState<{ id: string; items: any[] } | null>(null);
   const [employeeToDelete, setEmployeeToDelete] = useState<Employee | null>(null);
   const [deleteToast, setDeleteToast] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -292,6 +294,14 @@ export default function Employees({
   const [bulkStatusMsg, setBulkStatusMsg] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [isBulkImporting, setIsBulkImporting] = useState(false);
 
+  const beginEmployeeImportPreview = (items: any[]) => {
+    setIsBulkModalOpen(false);
+    setBulkText('');
+    setBulkStatusMsg(null);
+    setExternalImportRequest({ id: `employee-import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, items });
+    setIsExchangeModalOpen(true);
+  };
+
   // Form values
   const [formName, setFormName] = useState('');
   const [formCode, setFormCode] = useState('');
@@ -304,6 +314,31 @@ export default function Employees({
   const [formCalibrationLeadId, setFormCalibrationLeadId] = useState('');
   const [formApproverId, setFormApproverId] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+
+  const applyEmployeeImportPlan = (plan: ReturnType<typeof prepareEmployeeImport>) => {
+    const createdCount = plan.counts.NEW;
+    const updatedCount = plan.counts.UPDATE;
+    const totalSuccess = plan.changedCount;
+    if (totalSuccess > 0) {
+      // This is the only employee-import persistence point, reached after explicit confirmation.
+      db.saveEmployees(plan.employees);
+      if (onBulkUpdateEmployees) {
+        onBulkUpdateEmployees(plan.employees);
+      } else {
+        plan.employees.forEach(emp => {
+          const orig = employees.find(existing => existing.id === emp.id);
+          if (orig) onUpdateEmployee(emp.id, emp);
+          else onAddEmployee(emp);
+        });
+      }
+    }
+
+    return {
+      count: totalSuccess,
+      message: `Applied ${totalSuccess} employee changes (${createdCount} new, ${updatedCount} updated, ${plan.counts.UNCHANGED} unchanged, ${plan.counts.INVALID} invalid, ${plan.counts.DUPLICATE} duplicate, ${plan.counts['UNKNOWN / UNMAPPED']} unmapped).`,
+      errors: plan.errors,
+    };
+  };
 
   // Universal Data Exchange Configuration for Employees
   const employeesExchangeConfig: DataExchangeConfig<Employee> = {
@@ -365,179 +400,19 @@ export default function Employees({
         'کد پرسنلی تصویب‌کننده': ''
       }
     ],
-    onImport: (importedItems, mode) => {
-      let createdCount = 0;
-      let updatedCount = 0;
-      const errors: string[] = [];
-      const defaultProfId = profiles[0]?.id || 'prof-1';
-
-      // Initialize working copy based on mode
-      // If replace mode, protect system administrator accounts
-      let workingEmployees: Employee[] = mode === 'replace'
-        ? employees.filter(e => e.role === 'admin' || e.username === 'admin' || e.code === 'ADMIN-001')
-        : [...employees];
-
-      // Track processed codes and usernames within this batch to prevent internal duplicates
-      const seenBatchCodes = new Set<string>();
-      const seenBatchUsernames = new Set<string>();
-
-      // List of new employees that need evaluation shells created
-
-      importedItems.forEach((rawItem: any, index: number) => {
-        const rowNum = index + 1;
-        const name = (rawItem.name || rawItem['نام و نام خانوادگی'] || '').trim();
-        const code = (rawItem.code || rawItem['کد پرسنلی'] || '').trim().toUpperCase();
-        const unit = (rawItem.unit || rawItem['واحد سازمانی'] || 'سالن تولید').trim();
-
-        if (!name && !code) {
-          errors.push(`سطر ${rowNum}: سطر فاقد نام و کد پرسنلی بوده و نادیده گرفته شد.`);
-          return;
-        }
-
-        if (!code) {
-          errors.push(`سطر ${rowNum} (${name}): کد پرسنلی الزامی است.`);
-          return;
-        }
-
-        if (seenBatchCodes.has(code)) {
-          errors.push(`سطر ${rowNum} (${name}): کد پرسنلی «${code}» در همین فایل تکراری است.`);
-          return;
-        }
-        seenBatchCodes.add(code);
-        
-        // Match profile by ID, title, or code
-        const rawProf = (rawItem.profile || rawItem.profileId || rawItem['عنوان رده شغلی'] || rawItem['پروفایل شغلی'] || '').trim();
-        let profileId = defaultProfId;
-        if (rawProf) {
-          const matchedProfile = profiles.find(p => 
-            p.id === rawProf || 
-            p.code.toLowerCase() === rawProf.toLowerCase() || 
-            p.title.toLowerCase() === rawProf.toLowerCase()
-          );
-          if (matchedProfile) {
-            profileId = matchedProfile.id;
-          } else {
-            errors.push(`سطر ${rowNum} (${name}): الگوی شغلی «${rawProf}» یافت نشد؛ الگوی پیش‌فرض اعمال شد.`);
-          }
-        }
-
-        // Match Role
-        const rawRole = (rawItem.role || rawItem['نقش کاربری'] || rawItem['نقش'] || 'employee').trim().toLowerCase();
-        let role: UserRole = 'employee';
-        if (rawRole.includes('admin') || rawRole.includes('مدیر')) {
-          role = 'admin';
-        } else if (rawRole.includes('supervisor') || rawRole.includes('سرپرست')) {
-          role = 'supervisor';
-        }
-
-        // Clean & unique username
-        let username = (rawItem.username || rawItem['نام کاربری'] || '').trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
-        if (!username) {
-          const cleanCode = code.toLowerCase().replace(/[^a-z0-9]/g, '');
-          username = `user_${cleanCode || Math.random().toString(36).substring(2, 7)}`;
-        }
-
-        // Ensure unique username across working list and current batch
-        let finalUsername = username;
-        let counter = 1;
-        while (
-          seenBatchUsernames.has(finalUsername) || 
-          workingEmployees.some(e => e.username.toLowerCase() === finalUsername.toLowerCase() && e.code !== code)
-        ) {
-          finalUsername = `${username}_${counter}`;
-          counter++;
-        }
-        seenBatchUsernames.add(finalUsername);
-
-        // Supervisors & Hierarchy IDs (check in working employees or existing roster)
-        const rawSupCode = (rawItem.supervisor || rawItem.supervisorId || rawItem['کد پرسنلی سرپرست مستقیم'] || '').trim().toUpperCase();
-        const supervisor = rawSupCode ? (
-          workingEmployees.find(e => e.code.toUpperCase() === rawSupCode || e.id === rawSupCode) ||
-          employees.find(e => e.code.toUpperCase() === rawSupCode || e.id === rawSupCode)
-        ) : undefined;
-
-        const rawPeerCode = (rawItem.peer || rawItem.peerReviewerId || rawItem['کد پرسنلی ارزیاب همتا'] || '').trim().toUpperCase();
-        const peer = rawPeerCode ? (
-          workingEmployees.find(e => e.code.toUpperCase() === rawPeerCode || e.id === rawPeerCode) ||
-          employees.find(e => e.code.toUpperCase() === rawPeerCode || e.id === rawPeerCode)
-        ) : undefined;
-
-        const rawApproverCode = (rawItem.approver || rawItem.approverId || rawItem['کد پرسنلی تصویب‌کننده'] || '').trim().toUpperCase();
-        const approver = rawApproverCode ? (
-          workingEmployees.find(e => e.code.toUpperCase() === rawApproverCode || e.id === rawApproverCode) ||
-          employees.find(e => e.code.toUpperCase() === rawApproverCode || e.id === rawApproverCode)
-        ) : undefined;
-
-        const candidate = {
-          name,
-          code,
-          unit,
-          profileId,
-          role,
-          username: finalUsername,
-          supervisorId: supervisor?.id,
-          peerReviewerId: peer?.id,
-          approverId: approver?.id
-        };
-
-        const validation = validateEmployeeInput(candidate);
-        if (!validation.success) {
-          errors.push(`سطر ${rowNum} (${name || code}): ${validation.errors.join('، ')}`);
-          return;
-        }
-
-        const validEmp = validation.data;
-        const existingIdx = workingEmployees.findIndex(
-          e => e.code.toUpperCase() === validEmp.code.toUpperCase() || 
-               e.username.toLowerCase() === validEmp.username.toLowerCase()
-        );
-
-        if (existingIdx !== -1) {
-          // Update existing employee in place, preserving existing ID
-          const existing = workingEmployees[existingIdx];
-          workingEmployees[existingIdx] = {
-            ...validEmp,
-            id: existing.id
-          };
-          updatedCount++;
-        } else {
-          // Add new employee
-          const newEmp: Employee = {
-            ...validEmp,
-            id: `emp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
-          };
-          workingEmployees.push(newEmp);
-          createdCount++;
-        }
-      });
-
-      const totalSuccess = createdCount + updatedCount;
-      if (totalSuccess > 0) {
-        // Persist through the database service so cloud dirty tracking is immediate.
-        db.saveEmployees(workingEmployees);
-
-        // Notify parent state handler
-        if (onBulkUpdateEmployees) {
-          onBulkUpdateEmployees(workingEmployees);
-        } else {
-          // Fallback: reload page or notify individual
-          workingEmployees.forEach(emp => {
-            const orig = employees.find(e => e.id === emp.id);
-            if (orig) {
-              onUpdateEmployee(emp.id, emp);
-            } else {
-              onAddEmployee(emp);
-            }
-          });
-        }
-      }
-
+    onImport: (importedItems, mode) => applyEmployeeImportPlan(prepareEmployeeImport(importedItems, employees, profiles, mode)),
+    prepareImport: (importedItems, mode) => {
+      const plan = prepareEmployeeImport(importedItems, employees, profiles, mode);
       return {
-        count: totalSuccess,
-        message: `تعداد ${totalSuccess} پرونده پرسنلی (${createdCount} پرونده جدید و ${updatedCount} به‌روزرسانی) با اعتبارسنجی کامل اسلات‌ها ثبت و پایدار شدند.`,
-        errors
+        preview: {
+          rows: plan.rows,
+          counts: plan.counts,
+          changedCount: plan.changedCount,
+          removedCount: mode === 'replace' ? plan.counts.removed : undefined,
+        },
+        commit: () => applyEmployeeImportPlan(plan),
       };
-    }
+    },
   };
 
   // Bulk benchmark generator (for testing >1,000 employees performance)
@@ -681,31 +556,13 @@ export default function Employees({
 
   // Bulk Import Handlers
   const handleLoadRoster = (members: typeof PRESET_ROSTERS[0]['members'], defaultUnit: string) => {
-    let addedCount = 0;
-    const defaultProfId = profiles[0]?.id || 'prof-1';
-
-    members.forEach(member => {
-      const existsCode = employees.some(e => e.code.toUpperCase() === member.code.toUpperCase());
-      const existsUser = employees.some(e => e.username.toLowerCase() === member.username.toLowerCase());
-      
-      if (!existsCode && !existsUser) {
-        onAddEmployee({
-          name: member.name,
-          code: member.code,
-          unit: member.unit || defaultUnit,
-          profileId: defaultProfId,
-          role: member.role,
-          username: member.username
-        });
-        addedCount++;
-      }
-    });
-
-    if (addedCount > 0) {
-      setBulkStatusMsg({ text: `تعداد ${addedCount} همکار با موفقیت به فهرست پرسنل اضافه شدند.`, type: 'success' });
-    } else {
-      setBulkStatusMsg({ text: 'تمامی پرسنل این تیم قبلاً در سیستم ثبت شده‌اند.', type: 'info' });
-    }
+    beginEmployeeImportPreview(members.map(member => ({
+      name: member.name,
+      code: member.code,
+      unit: member.unit || defaultUnit,
+      role: member.role,
+      username: member.username,
+    })));
   };
 
   // Bulk Import from real XLSX file using ExcelJS cell-based parsing
@@ -721,12 +578,8 @@ export default function Employees({
     try {
       const { readWorkbookRows } = await import('../utils/excelWorkbook');
       const workbook = await readWorkbookRows(file);
-      const defaultProfId = profiles[0]?.id || 'prof-1';
-      let addedCount = 0;
-      let skippedCount = 0;
+      const importRows: Record<string, unknown>[] = [];
       let matchedSheets = 0;
-      const seenCodes = new Set<string>();
-      const seenUsernames = new Set<string>();
       const latinDigits = (value: string) => value.replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x06F0))
         .replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x0660));
 
@@ -743,34 +596,30 @@ export default function Employees({
         const unitIdx = headers.findIndex(h => h.includes('واحد') || h === 'unit' || h.includes('بخش'));
         const roleIdx = headers.findIndex(h => h.includes('نقش') || h === 'role' || h.includes('سمت'));
         const usernameIdx = headers.findIndex(h => h.includes('کاربری') || h === 'username' || h.includes('login'));
+        const profileIdx = headers.findIndex(h => h.includes('پروفایل') || h.includes('رده شغلی') || h === 'profile' || h === 'profileid' || h === 'job profile');
+        const supervisorIdx = headers.findIndex(h => h.includes('سرپرست') || h === 'supervisor' || h === 'supervisorid');
+        const peerIdx = headers.findIndex(h => h.includes('همتا') || h === 'peer' || h === 'peerreviewerid');
+        const approverIdx = headers.findIndex(h => h.includes('تصویب') || h === 'approver' || h === 'approverid');
+        const mappedIndexes = new Set([codeIdx, nameIdx, unitIdx, roleIdx, usernameIdx, profileIdx, supervisorIdx, peerIdx, approverIdx].filter(index => index >= 0));
         for (let i = 1; i < rows.length; i++) {
           const parts = (rows[i] || []).map(cell => String(cell ?? '').trim());
           if (parts.every(part => !part)) continue;
           const code = latinDigits(parts[codeIdx] || '').toUpperCase();
           const name = parts[nameIdx] || '';
-          const unit = unitIdx >= 0 ? (parts[unitIdx] || 'سالن تولید') : 'سالن تولید';
-          const roleVal = roleIdx >= 0 ? (parts[roleIdx] || '').toLowerCase() : '';
-          let role: UserRole = 'employee';
-          if (roleVal === 'supervisor' || roleVal === 'سرپرست') role = 'supervisor';
-          else if (roleVal === 'admin' || roleVal === 'مدیر') role = 'admin';
-          const username = usernameIdx >= 0 && parts[usernameIdx]
-            ? parts[usernameIdx].toLowerCase()
-            : `user_${code.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
-          const candidate = { name, code, unit, profileId: defaultProfId, role, username };
-          const validation = validateEmployeeInput(candidate);
-          if (!validation.success) { skippedCount++; continue; }
-          const parsed = validation.data;
-          const codeKey = parsed.code.toUpperCase();
-          const userKey = parsed.username.toLowerCase();
-          if (seenCodes.has(codeKey) || seenUsernames.has(userKey) ||
-              employees.some(employee => employee.code.toUpperCase() === codeKey || employee.username.toLowerCase() === userKey)) {
-            skippedCount++;
-            continue;
-          }
-          onAddEmployee(parsed);
-          seenCodes.add(codeKey);
-          seenUsernames.add(userKey);
-          addedCount++;
+          const candidate: Record<string, unknown> = {
+            name, code,
+            unit: unitIdx >= 0 ? (parts[unitIdx] || 'سالن تولید') : 'سالن تولید',
+            role: roleIdx >= 0 ? (parts[roleIdx] || 'employee') : 'employee',
+            username: usernameIdx >= 0 ? (parts[usernameIdx] || '') : '',
+          };
+          if (profileIdx >= 0) candidate.profile = parts[profileIdx] || '';
+          if (supervisorIdx >= 0) candidate.supervisor = parts[supervisorIdx] || '';
+          if (peerIdx >= 0) candidate.peer = parts[peerIdx] || '';
+          if (approverIdx >= 0) candidate.approver = parts[approverIdx] || '';
+          headers.forEach((header, index) => {
+            if (!mappedIndexes.has(index) && parts[index]) candidate[header] = parts[index];
+          });
+          importRows.push(candidate);
         }
       }
       if (matchedSheets === 0) {
@@ -778,11 +627,7 @@ export default function Employees({
         return;
       }
 
-      if (addedCount > 0) {
-        setBulkStatusMsg({ text: `تعداد ${addedCount} پرونده جدید از فایل Excel ایجاد شد. (${skippedCount} ردیف نادیده/تکراری)`, type: 'success' });
-      } else {
-        setBulkStatusMsg({ text: `هیچ پرسنل جدیدی ثبت نشد (${skippedCount} ردیف نادیده/تکراری).`, type: 'error' });
-      }
+      beginEmployeeImportPreview(importRows);
     } catch (err: any) {
       setBulkStatusMsg({ text: `خطا در پردازش فایل Excel: ${err.message || 'فرمت نامعتبر'}`, type: 'error' });
     } finally {
@@ -798,43 +643,18 @@ export default function Employees({
     }
 
     const lines = bulkText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    let addedCount = 0;
-    const defaultProfId = profiles[0]?.id || 'prof-1';
-
-    lines.forEach(line => {
+    const importRows = lines.flatMap(line => {
       const parts = line.includes('\t') ? line.split('\t') : line.split(',');
-      if (parts.length >= 2) {
-        const code = parts[0]?.trim().toUpperCase();
-        const name = parts[1]?.trim();
-        const unit = parts[2]?.trim() || 'سالن تولید';
-        const role = (parts[3]?.trim().toLowerCase() === 'supervisor' || parts[3]?.trim().toLowerCase() === 'سرپرست' ? 'supervisor' : parts[3]?.trim().toLowerCase() === 'admin' ? 'admin' : 'employee') as UserRole;
-        const username = (parts[4]?.trim().toLowerCase() || `user_${code.toLowerCase().replace(/[^a-z0-9]/g, '')}`);
-
-        if (code && name) {
-          const existsCode = employees.some(e => e.code.toUpperCase() === code);
-          const existsUser = employees.some(e => e.username.toLowerCase() === username);
-
-          if (!existsCode && !existsUser) {
-            onAddEmployee({
-              name,
-              code,
-              unit,
-              profileId: defaultProfId,
-              role,
-              username
-            });
-            addedCount++;
-          }
-        }
-      }
+      if (parts.length < 2) return [{ code: '', name: '' }];
+      return [{
+        code: parts[0]?.trim().toUpperCase() || '',
+        name: parts[1]?.trim() || '',
+        unit: parts[2]?.trim() || 'سالن تولید',
+        role: parts[3]?.trim() || 'employee',
+        username: parts[4]?.trim().toLowerCase() || '',
+      }];
     });
-
-    if (addedCount > 0) {
-      setBulkStatusMsg({ text: `تعداد ${addedCount} پرونده پرسنلی جدید با موفقیت ایجاد گردید.`, type: 'success' });
-      setBulkText('');
-    } else {
-      setBulkStatusMsg({ text: 'هیچ پرسنل جدیدی ثبت نشد. کدهای تکراری یا فرمت ورودی را بررسی نمایید.', type: 'error' });
-    }
+    beginEmployeeImportPreview(importRows);
   };
 
   const filteredEmployees = useMemo(() => {
@@ -1564,7 +1384,8 @@ export default function Employees({
       <UniversalDataExchange<Employee>
         config={employeesExchangeConfig}
         isOpen={isExchangeModalOpen}
-        onClose={() => setIsExchangeModalOpen(false)}
+        onClose={() => { setIsExchangeModalOpen(false); setExternalImportRequest(null); }}
+        externalImportRequest={externalImportRequest}
         theme={theme}
       />
 
@@ -1652,7 +1473,9 @@ export default function Employees({
           <div role="dialog" aria-modal="true" aria-label="انتساب گروهی پرسنل" className="max-h-[90vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-3xl border border-teal-500/40 bg-slate-900 p-6 text-right shadow-2xl">
             <h3 className="text-lg font-black text-slate-100">پیش‌نمایش انتساب گروهی</h3>
             <p className="text-xs text-slate-300">{selectedEmpIds.size} پرونده انتخاب‌شده؛ فیلدهای خالی بدون تغییر می‌مانند.</p>
-            <div className="max-h-32 overflow-y-auto rounded-xl bg-slate-950 p-3 text-xs text-slate-300">{employees.filter(emp => selectedEmpIds.has(emp.id)).map(emp => <div key={emp.id}>{emp.code} — {emp.name}</div>)}</div>
+            <div data-testid="bulk-selection-summary" className="rounded-xl bg-slate-950 p-3 text-xs text-slate-300">
+              {selectedEmpIds.size} پرونده انتخاب‌شده؛ پیش‌نمایش تغییرها، نام و کد هر پرونده را نشان می‌دهد.
+            </div>
             <label className="block text-xs text-slate-300">واحد جدید<input aria-label="واحد جدید" value={bulkAssignUnit} onChange={event => setBulkAssignUnit(event.target.value)} className="mt-1 w-full rounded-xl border border-slate-600 bg-slate-950 p-2 text-slate-100" /></label>
             <label className="block text-xs text-slate-300">سرپرست جدید<select aria-label="سرپرست جدید" value={bulkAssignSupervisor} onChange={event => setBulkAssignSupervisor(event.target.value)} className="mt-1 w-full rounded-xl border border-slate-600 bg-slate-950 p-2 text-slate-100"><option value="">بدون تغییر</option>{employees.filter(emp => (emp.role === 'admin' || emp.role === 'supervisor') && !selectedEmpIds.has(emp.id)).map(emp => <option key={emp.id} value={emp.id}>{emp.name} ({emp.code})</option>)}</select></label>
             <label className="block text-xs text-slate-300">الگوی شایستگی جدید<select aria-label="الگوی شایستگی جدید" value={bulkAssignProfile} onChange={event => setBulkAssignProfile(event.target.value)} className="mt-1 w-full rounded-xl border border-slate-600 bg-slate-950 p-2 text-slate-100"><option value="">بدون تغییر</option>{profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.title}</option>)}</select></label>
